@@ -89,7 +89,7 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
   t.after(() => context.Listener.shutdown());
   return {
     button: doc.querySelector('.codex-listener-button'), arrow: doc.querySelector('.codex-listener-settings'), doc, events, saved,
-    shutdown: () => context.Listener.shutdown(), requests, processes, launch, readers, alerts, searches, commands,
+    shutdown: () => context.Listener.shutdown(), requests, processes, launch, readers, alerts, searches, commands, timers,
     set promptValue(value) { promptValue = value; },
     set annotations(value) { annotations = value; }, set failSend(value) { failSend = value; },
     event: () => observer.notify('modify', 'item'), close: () => { readers.length = 0; observer.notify('close', 'tab'); },
@@ -168,13 +168,46 @@ test('group annotations use a group PDF link', async t => {
 });
 
 const click = target => ({ currentTarget: target, target, preventDefault() {}, stopPropagation() {} });
+function setDelay(f, value) {
+  f.promptValue = value;
+  f.arrow.onclick(click(f.arrow));
+  const option = f.doc.querySelector('.codex-listener-menu').children.find(e => e.textContent === '发送延迟…');
+  option.onclick(click(option));
+}
+test('changing delay preserves pending edits and resets the debounce timer', async t => {
+  const f = await fixture(t); await f.button.onclick();
+  f.annotations = [annotation('first')]; f.event();
+  setDelay(f, '5.5');
+  assert.equal(f.saved.get('extensions.zotero-codex-listener.sendDelay'), '5.5');
+  await f.run(1500); assert.equal(f.sends().length, 0);
+  const pending = [...f.timers].find(([, timer]) => timer.ms === 5500)[0];
+  f.annotations = [annotation('second')]; f.event();
+  assert.equal(f.timers.has(pending), false);
+  await f.run(5500);
+  assert.equal(f.sends().length, 1);
+  assert.equal(payload(f.sends()[0]).changes[0].after.comment, 'second');
+  await f.button.onclick(); await f.button.onclick();
+  f.annotations = [annotation('third')]; f.event();
+  await f.run(1500); assert.equal(f.sends().length, 1);
+  await f.run(5500); assert.equal(f.sends().length, 2);
+});
+test('cancelled and invalid delay settings preserve the current delay and listener', async t => {
+  const f = await fixture(t); setDelay(f, '2'); await f.button.onclick();
+  setDelay(f, null); assert.equal(f.alerts.length, 0);
+  for (const value of ['', 'abc', '0', '-1', 'Infinity', '3601']) setDelay(f, value);
+  assert.equal(f.alerts.length, 6);
+  assert.equal(f.saved.get('extensions.zotero-codex-listener.sendDelay'), '2');
+  assert.equal(f.processes[0].killed, false);
+  f.annotations = [annotation('new')]; f.event(); await f.run(2000);
+  assert.equal(f.sends().length, 1);
+});
 test('settings arrow opens a menu and saves the target without starting the listener', async t => {
   const f = await fixture(t);
   f.arrow.onclick(click(f.arrow));
   const menu = f.doc.querySelector('.codex-listener-menu');
   assert.ok(menu); assert.equal(f.arrow.getAttribute('aria-expanded'), 'true');
   assert.equal(menu.style.left, '600px'); assert.equal(menu.style.top, '44px');
-  assert.deepEqual(menu.children.map(e => e.textContent), ['设置目标会话…', 'Node.js 路径…']);
+  assert.deepEqual(menu.children.map(e => e.textContent), ['设置目标会话…', '发送延迟…', 'Node.js 路径…']);
   f.promptValue = 'codex://threads/87654321-1234-1234-1234-123456789abc';
   menu.children[0].onclick(click(menu.children[0]));
   assert.equal(f.arrow.getAttribute('aria-expanded'), 'false');

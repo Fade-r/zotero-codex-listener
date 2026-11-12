@@ -12,6 +12,8 @@ var Listener = (() => {
   const save = (name, value) => Zotero.Prefs.set(PREF + name, value, true);
   const key = item => `${item.libraryID}/${item.key}`;
   const targets = () => { try { return JSON.parse(pref('targets') || '{}'); } catch { return {}; } };
+  const validDelay = seconds => Number.isFinite(seconds) && seconds >= 0.1 && seconds <= 3600;
+  const sendDelay = () => { const seconds = Number(pref('sendDelay')); return validDelay(seconds) ? seconds : 1.5; };
 
   async function nodeCommand() {
     if (pref('node')) return pref('node');
@@ -134,6 +136,16 @@ var Listener = (() => {
     stored[key(attachment)] = threadId; save('targets', JSON.stringify(stored));
     errorItem = null; lastError = ''; render(); return true;
   }
+  function configureDelay() {
+    const value = ask('发送延迟', '停止修改后等待多少秒再发送（0.1–3600，默认 1.5）', String(sendDelay()));
+    if (value === null) return;
+    const seconds = Number(value.trim());
+    if (!validDelay(seconds)) {
+      Services.prompt.alert(Zotero.getMainWindow(), '发送延迟', '请输入 0.1–3600 之间的秒数。');
+      return;
+    }
+    save('sendDelay', String(seconds)); schedule();
+  }
   function menu(event, reader) {
     event.preventDefault(); event.stopPropagation();
     const anchor = event.currentTarget, doc = anchor.ownerDocument;
@@ -154,6 +166,7 @@ var Listener = (() => {
     popup.style.top = `${rect.bottom + 4}px`;
     for (const [label, action] of [
       ['设置目标会话…', () => configure(reader)],
+      ['发送延迟…', configureDelay],
       ['Node.js 路径…', () => { const value = ask('Node.js', '通常留空即可自动查找；也可填 node.exe 的完整路径', pref('node')); if (value !== null) { stop(); save('node', value.trim()); } }]
     ]) {
       const option = doc.createElement('button'); option.textContent = label;
@@ -217,7 +230,7 @@ var Listener = (() => {
   }
   function schedule() {
     clearTimeout(timer);
-    if (active) timer = setTimeout(() => void flush(), 1500);
+    if (active) timer = setTimeout(() => void flush(), Math.round(sendDelay() * 1000));
   }
   async function flush() {
     const current = active, connection = rpc;
