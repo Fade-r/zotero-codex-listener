@@ -5,8 +5,8 @@
 需要 Windows、Zotero、Codex 桌面端和 [Node.js 22+](https://nodejs.org/)。
 
 1. 从 [Releases](https://github.com/Fade-r/zotero-codex-listener/releases) 下载 `.xpi`，在 Zotero 插件管理器中选择“从文件安装插件”。
-2. 打开 PDF，右键 **○ 监听**，粘贴目标会话的 `codex://threads/…` 链接、ID 或 Markdown 链接。
-3. 单击开始，显示 **● 监听中**；再次单击停止。找不到 Node.js 时，在右键菜单中填写其路径。
+2. 打开 PDF，点击 **○ 监听** 旁的 **▾**，粘贴目标会话的 `codex://threads/…` 链接、ID 或 Markdown 链接。
+3. 单击“监听”开始，显示 **● 监听中**；再次单击停止。找不到 Node.js 时，在下拉菜单中填写其路径。
 
 默认停止，一次监听一个 PDF。仅发送开启后的改动，无改动时不调用模型。关闭 PDF 或连接出错后停止；重新开启不会补发遗漏的变化。已投递的消息仍可能继续处理。
 

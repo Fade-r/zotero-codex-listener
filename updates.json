@@ -3,9 +3,9 @@
     "zotero-codex-listener@fade-r.github.io": {
       "updates": [
         {
-          "version": "0.1.2",
-          "update_link": "https://github.com/Fade-r/zotero-codex-listener/releases/download/v0.1.2/zotero-codex-listener-0.1.2.xpi",
-          "update_hash": "sha256:52cdbbf58a18d552e3f2356bc42f9364a187fbf609d5479ea5c1a167196043d2",
+          "version": "0.1.3",
+          "update_link": "https://github.com/Fade-r/zotero-codex-listener/releases/download/v0.1.3/zotero-codex-listener-0.1.3.xpi",
+          "update_hash": "sha256:b0dff92c6ea82af576d7e3f8d72b7d78b3243c5ca70a990e1bd97c1f2b3bb996",
           "applications": {
             "zotero": {
               "strict_min_version": "7.0",

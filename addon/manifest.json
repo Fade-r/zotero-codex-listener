@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero Codex Listener",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Send annotation changes to a chosen Codex desktop conversation.",
   "author": "Fade-r",
   "homepage_url": "https://github.com/Fade-r/zotero-codex-listener",

@@ -97,7 +97,7 @@ var Listener = (() => {
       button.style.color = error ? '#bc3838' : running ? '#278243' : 'inherit';
       button.setAttribute('aria-pressed', String(running));
       button.title = [error || (connecting ? '点击取消连接' : running ? '点击停止监听；已投递消息可能仍在处理中' : '点击开始监听'),
-        '右键设置目标会话', running ? `目标：${active.threadId}` : ''].filter(Boolean).join('\n');
+        '点击旁边的箭头设置目标会话', running ? `目标：${active.threadId}` : ''].filter(Boolean).join('\n');
     }
   }
 
@@ -126,37 +126,54 @@ var Listener = (() => {
   }
   function menu(event, reader) {
     event.preventDefault(); event.stopPropagation();
-    const doc = event.currentTarget.ownerDocument;
+    const anchor = event.currentTarget, doc = anchor.ownerDocument;
+    const wasOpen = anchor.getAttribute('aria-expanded') === 'true';
     for (const close of menus) close();
+    if (wasOpen) return;
     const popup = doc.createElement('div'); popup.className = 'codex-listener-menu';
-    const close = () => { popup.remove(); doc.removeEventListener('pointerdown', dismiss, true); menus.delete(close); };
-    const dismiss = event => { if (!popup.contains(event.target)) close(); };
+    popup.setAttribute('role', 'menu');
+    const close = () => {
+      popup.remove(); anchor.setAttribute('aria-expanded', 'false');
+      doc.removeEventListener('pointerdown', dismiss, true); doc.removeEventListener('keydown', keydown, true); menus.delete(close);
+    };
+    const dismiss = event => { if (!popup.contains(event.target) && !anchor.contains(event.target)) close(); };
+    const keydown = event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); anchor.focus(); } };
+    const rect = anchor.getBoundingClientRect();
     popup.style.cssText = 'position:fixed;z-index:10000;padding:4px;border:1px solid #999;border-radius:5px;background:Canvas;color:CanvasText;box-shadow:0 2px 8px #0003;';
-    popup.style.left = `${Math.min(event.clientX, doc.documentElement.clientWidth - 200)}px`;
-    popup.style.top = `${event.clientY}px`;
+    popup.style.left = `${Math.max(4, Math.min(rect.left, doc.documentElement.clientWidth - 200))}px`;
+    popup.style.top = `${rect.bottom + 4}px`;
     for (const [label, action] of [
       ['设置目标会话…', () => configure(reader)],
       ['Node.js 路径…', () => { const value = ask('Node.js', '通常留空即可自动查找；也可填 node.exe 的完整路径', pref('node')); if (value !== null) { stop(); save('node', value.trim()); } }]
     ]) {
       const option = doc.createElement('button'); option.textContent = label;
+      option.setAttribute('role', 'menuitem');
       option.style.cssText = 'display:block;border:0;background:transparent;color:inherit;padding:7px 12px;width:100%;text-align:left;cursor:pointer;';
-      option.onclick = () => { close(); try { action(); } catch (error) { fail(reader.itemID, error); } };
+      option.onclick = event => { event.preventDefault(); event.stopPropagation(); close(); try { action(); } catch (error) { fail(reader.itemID, error); } };
       popup.append(option);
     }
     doc.body.append(popup);
+    anchor.setAttribute('aria-expanded', 'true');
     menus.add(close);
     doc.addEventListener('pointerdown', dismiss, true);
+    doc.addEventListener('keydown', keydown, true);
   }
   function attach(reader, doc, append) {
     if (doc.querySelector('.codex-listener-button')) return;
+    const control = doc.createElement('div'); control.className = 'codex-listener-control';
+    control.style.cssText = 'display:inline-flex;align-items:center;';
     const button = doc.createElement('button'); button.className = 'toolbar-button codex-listener-button';
     button.style.cssText = 'width:auto;min-width:70px;padding:0 7px;font-size:12px;white-space:nowrap;';
     button.onclick = async () => {
       if (active?.itemID === reader.itemID || starting?.itemID === reader.itemID) { stop(); return; }
       try { await start(reader); } catch (error) { fail(reader.itemID, error); }
     };
-    button.oncontextmenu = event => menu(event, reader);
-    append(button); buttons.set(button, reader.itemID); render();
+    const arrow = doc.createElement('button'); arrow.className = 'toolbar-button codex-listener-settings';
+    arrow.textContent = '▾'; arrow.title = '监听设置';
+    arrow.setAttribute('aria-label', '监听设置'); arrow.setAttribute('aria-haspopup', 'menu'); arrow.setAttribute('aria-expanded', 'false');
+    arrow.style.cssText = 'width:22px;min-width:22px;padding:0;font-size:12px;';
+    arrow.onclick = event => menu(event, reader);
+    control.append(button, arrow); append(control); buttons.set(button, reader.itemID); render();
   }
   const toolbar = ({ reader, doc, append }) => attach(reader, doc, append);
   function attachExisting() {
@@ -240,7 +257,7 @@ var Listener = (() => {
     Zotero.Reader.unregisterEventListener('renderToolbar', toolbar);
     if (observer) Zotero.Notifier.unregisterObserver(observer);
     for (const close of menus) close();
-    for (const button of buttons.keys()) button.remove(); buttons.clear();
+    for (const button of buttons.keys()) button.closest('.codex-listener-control')?.remove(); buttons.clear();
     if (bridgeFile?.exists()) { const parent = bridgeFile.parent; bridgeFile.remove(false); parent.remove(false); }
   }
   return { startup, shutdown, attachExisting, checkReader };
