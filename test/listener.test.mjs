@@ -14,7 +14,8 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
   let timerID = 0, observer, handler, annotations = [], failSend = false;
   const launch = deferred();
   const events = new Map(), saved = new Map();
-  const alerts = [], searches = [], commands = [];
+  const alerts = [], searches = [], commands = [], confirmations = [];
+  let confirmResult = false, note = null;
   let promptValue = null;
   const file = () => ({ path: 'test-temp/bridge.mjs', append() {}, createUnique() {}, clone: file, exists: () => false });
   const doc = {
@@ -36,7 +37,7 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
     }
   };
   doc.body = { append() {} };
-  const paper = { key: 'PAPER', libraryID: 1, isRegularItem: () => true, getNotes: () => [], getField: () => 'Synthetic paper' };
+  const paper = { key: 'PAPER', libraryID: 1, isRegularItem: () => true, getNotes: () => note ? [2] : [], getField: () => 'Synthetic paper' };
   const attachment = { key: 'PDF', libraryID: 1, parentItem: paper, getAnnotations: () => annotations };
   const reader = { itemID: 1 }, readers = [reader];
   const Subprocess = {
@@ -68,7 +69,7 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
     Zotero: {
       Prefs: { get: name => saved.get(name) || (name.endsWith('targets') ? '{"1/PDF":"12345678-1234-1234-1234-123456789abc"}' : ''), set: (name, value) => saved.set(name, value) },
       getMainWindow() {},
-      Items: { get: () => attachment }, Libraries: { get: () => group ? { libraryType: 'group', groupID: 42 } : { libraryType: 'user' } },
+      Items: { get: id => id === 2 ? note : attachment }, Libraries: { get: () => group ? { libraryType: 'group', groupID: 42 } : { libraryType: 'user' } },
       Reader: { _readers: readers, registerEventListener: (_, fn) => { handler = fn; }, unregisterEventListener() {} },
       Notifier: { registerObserver: obj => { observer = obj; return 1; }, unregisterObserver() {} },
       getTempDirectory: file, File: { putContentsAsync: async () => {}, getContentsAsync: async channel => {
@@ -78,7 +79,9 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
         return '';
       } }, logError() {}
     },
-    Services: { prompt: { alert(_win, title, message) { alerts.push({ title, message }); }, prompt(_win, _title, _message, input) { if (promptValue === null) return false; input.value = promptValue; return true; } } },
+    Services: { prompt: { BUTTON_TITLE_IS_STRING: 127, BUTTON_POS_0: 1, BUTTON_POS_1: 256,
+      confirmEx(_win, title, message, _flags, yes, no) { confirmations.push({ title, message, yes, no }); return confirmResult ? 0 : 1; },
+      alert(_win, title, message) { alerts.push({ title, message }); }, prompt(_win, _title, _message, input) { if (promptValue === null) return false; input.value = promptValue; return true; } } },
     Components: { interfaces: { nsIFile: { DIRECTORY_TYPE: 1 } } }, rootURI: 'jar:file:///plugin.xpi!/',
     ChromeUtils: { importESModule: name => name.includes('NetUtil') ? { NetUtil: { newChannel: options => options } } : name.includes('Subprocess') ? { Subprocess } : {
       setTimeout: (fn, ms) => { timers.set(++timerID, { fn, ms }); return timerID; }, clearTimeout: id => timers.delete(id)
@@ -89,7 +92,9 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
   t.after(() => context.Listener.shutdown());
   return {
     button: doc.querySelector('.codex-listener-button'), arrow: doc.querySelector('.codex-listener-settings'), doc, events, saved,
-    shutdown: () => context.Listener.shutdown(), requests, processes, launch, readers, alerts, searches, commands, timers,
+    shutdown: () => context.Listener.shutdown(), requests, processes, launch, readers, alerts, searches, commands, timers, confirmations,
+    set confirmResult(value) { confirmResult = value; },
+    set note(value) { note = value === null ? null : { key: 'NOTE', libraryID: 1, getNote: () => value }; },
     set promptValue(value) { promptValue = value; },
     set annotations(value) { annotations = value; }, set failSend(value) { failSend = value; },
     event: () => observer.notify('modify', 'item'), close: () => { readers.length = 0; observer.notify('close', 'tab'); },
@@ -180,6 +185,90 @@ function toggleTiming(f) {
   option.onclick(click(option));
 }
 const pendingSendTimer = (f, ms) => [...f.timers].find(([, timer]) => timer.ms === ms)?.[0];
+function setIdle(f, value) {
+  f.promptValue = value; f.arrow.onclick(click(f.arrow));
+  const option = f.doc.querySelector('.codex-listener-menu').children.find(e => e.textContent === '无改动超时…');
+  option.onclick(click(option));
+}
+test('idle timeout stops both timing modes and discards unsent changes without prompting', async t => {
+  for (const fixed of [false, true]) {
+    const f = await fixture(t); if (fixed) toggleTiming(f);
+    setIdle(f, '1'); await f.button.onclick();
+    f.annotations = [annotation('pending')]; f.event();
+    await f.run(60000); await f.run(1500); await f.run(10000);
+    assert.equal(f.processes[0].killed, true); assert.equal(f.sends().length, 0);
+    assert.equal(f.button.textContent, '○ 超时停止');
+    assert.equal(f.confirmations.length, 0); assert.equal(f.alerts.length, 0);
+    assert.equal(f.timers.size, 0);
+    await f.button.onclick(); assert.ok(pendingSendTimer(f, 60000));
+  }
+});
+test('only changes to watched annotations or notes reset idle timeout, including changes reverted later', async t => {
+  const f = await fixture(t); setIdle(f, '1'); await f.button.onclick();
+  let timer = pendingSendTimer(f, 60000); f.event();
+  assert.equal(pendingSendTimer(f, 60000), timer);
+  for (const comment of ['edit', 'revised']) {
+    f.annotations = [annotation(comment)]; f.event();
+    assert.equal(f.timers.has(timer), false); timer = pendingSendTimer(f, 60000);
+  }
+  f.annotations = []; f.event();
+  assert.equal(f.timers.has(timer), false); timer = pendingSendTimer(f, 60000);
+  for (const value of ['note', 'revised note', null]) {
+    f.note = value; f.event();
+    assert.equal(f.timers.has(timer), false); timer = pendingSendTimer(f, 60000);
+  }
+  await f.run(1500); assert.equal(f.sends().length, 0);
+  assert.equal(pendingSendTimer(f, 60000), timer);
+});
+test('idle timeout defaults off and can be disabled; invalid or cancelled settings leave it unchanged', async t => {
+  const f = await fixture(t); await f.button.onclick();
+  assert.equal(pendingSendTimer(f, 60000), undefined);
+  setIdle(f, '1'); const timer = pendingSendTimer(f, 60000);
+  setIdle(f, null);
+  for (const value of ['', '-1', 'abc', 'Infinity', '1441']) setIdle(f, value);
+  assert.equal(pendingSendTimer(f, 60000), timer);
+  assert.equal(f.alerts.length, 5);
+  setIdle(f, '0'); assert.equal(f.timers.has(timer), false);
+  assert.equal(f.saved.get('extensions.zotero-codex-listener.idleMinutes'), '0');
+  assert.equal(f.processes[0].killed, false);
+});
+test('manual stop can send or discard pending net changes in either timing mode', async t => {
+  for (const fixed of [false, true]) for (const send of [false, true]) {
+    const f = await fixture(t); if (fixed) toggleTiming(f);
+    await f.button.onclick(); f.annotations = [annotation('pending')]; f.event();
+    f.confirmResult = send; await f.button.onclick();
+    assert.equal(f.confirmations.length, 1); assert.equal(f.sends().length, Number(send));
+    assert.equal(f.processes[0].killed, true); assert.equal(f.timers.size, 0);
+  }
+});
+test('manual stop does not ask about changes that cancel out', async t => {
+  const f = await fixture(t); f.annotations = [annotation('original')]; await f.button.onclick();
+  f.annotations = [annotation('edited')]; f.event();
+  f.annotations = [annotation('original')]; f.event();
+  await f.button.onclick();
+  assert.equal(f.confirmations.length, 0); assert.equal(f.sends().length, 0);
+});
+test('manual send-and-stop waits for in-flight delivery and sends only subsequent changes', async t => {
+  const f = await fixture(t, { delayedSend: true }); setIdle(f, '1'); await f.button.onclick();
+  f.annotations = [annotation('first')]; f.event(); await f.run(1500);
+  f.annotations = [annotation('second')]; f.event(); f.confirmResult = true;
+  const stopping = f.button.onclick();
+  await f.button.onclick(); assert.equal(f.confirmations.length, 1);
+  await f.run(60000); assert.equal(f.processes[0].killed, false);
+  f.processes[0].reply(f.sends()[0]); await tick();
+  assert.equal(f.sends().length, 2);
+  assert.equal(payload(f.sends()[1]).changes[0].before.comment, 'first');
+  assert.equal(payload(f.sends()[1]).changes[0].after.comment, 'second');
+  f.processes[0].reply(f.sends()[1]); await stopping;
+  assert.equal(f.processes[0].killed, true); assert.equal(f.timers.size, 0);
+});
+test('manual send-and-stop reports a failed delivery once without retrying', async t => {
+  const f = await fixture(t); await f.button.onclick(); f.failSend = true;
+  f.annotations = [annotation('pending')]; f.event(); f.confirmResult = true;
+  await f.button.onclick();
+  assert.equal(f.sends().length, 1); assert.equal(f.alerts.length, 1);
+  assert.equal(f.button.textContent, '● 已停止');
+});
 test('fixed intervals keep ticking without edits and edits do not reset the timer', async t => {
   const f = await fixture(t); setDelay(f, '3'); toggleTiming(f);
   assert.equal(f.saved.get('extensions.zotero-codex-listener.timing'), 'fixed');
@@ -195,7 +284,7 @@ test('fixed intervals keep ticking without edits and edits do not reset the time
   await f.button.onclick(); assert.equal(pendingSendTimer(f, 3000), undefined);
   await f.button.onclick(); assert.ok(pendingSendTimer(f, 3000));
   toggleTiming(f);
-  const before = pendingSendTimer(f, 3000); f.event();
+  const before = pendingSendTimer(f, 3000); f.annotations = [annotation('third')]; f.event();
   assert.notEqual(pendingSendTimer(f, 3000), before);
 });
 test('fixed intervals retain edits during delivery without overlapping sends or shifting the timer', async t => {
@@ -242,7 +331,7 @@ test('settings arrow opens a menu and saves the target without starting the list
   const menu = f.doc.querySelector('.codex-listener-menu');
   assert.ok(menu); assert.equal(f.arrow.getAttribute('aria-expanded'), 'true');
   assert.equal(menu.style.left, '600px'); assert.equal(menu.style.top, '44px');
-  assert.deepEqual(menu.children.map(e => e.textContent), ['设置目标会话…', '计时方式：修改后等待', '发送间隔…', 'Node.js 路径…']);
+  assert.deepEqual(menu.children.map(e => e.textContent), ['设置目标会话…', '计时方式：修改后等待', '发送间隔…', '无改动超时…', 'Node.js 路径…']);
   f.promptValue = 'codex://threads/87654321-1234-1234-1234-123456789abc';
   menu.children[0].onclick(click(menu.children[0]));
   assert.equal(f.arrow.getAttribute('aria-expanded'), 'false');

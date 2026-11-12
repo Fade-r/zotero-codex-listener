@@ -6,7 +6,8 @@ var Listener = (() => {
   const { setTimeout, clearTimeout } = ChromeUtils.importESModule('resource://gre/modules/Timer.sys.mjs');
   const buttons = new Map();
   const menus = new Set();
-  let active = null, starting = null, epoch = 0, observer, timer, heartbeat, bridgeFile, rpc;
+  let active = null, starting = null, epoch = 0, observer, timer, heartbeat, idleTimer, bridgeFile, rpc;
+  let idleStoppedItem = null;
   let lastError = '', errorItem = null;
   const pref = name => Zotero.Prefs.get(PREF + name, true) || '';
   const save = (name, value) => Zotero.Prefs.set(PREF + name, value, true);
@@ -15,6 +16,8 @@ var Listener = (() => {
   const validDelay = seconds => Number.isFinite(seconds) && seconds >= 0.1 && seconds <= 3600;
   const sendDelay = () => { const seconds = Number(pref('sendDelay')); return validDelay(seconds) ? seconds : 1.5; };
   const fixedInterval = () => pref('timing') === 'fixed';
+  const validIdle = minutes => Number.isFinite(minutes) && minutes >= 0 && minutes <= 1440;
+  const idleMinutes = () => { const minutes = Number(pref('idleMinutes')); return validIdle(minutes) ? minutes : 0; };
 
   async function nodeCommand() {
     if (pref('node')) return pref('node');
@@ -105,20 +108,48 @@ var Listener = (() => {
       const running = active?.itemID === itemID;
       const connecting = starting?.itemID === itemID;
       const error = errorItem === itemID && lastError;
-      button.textContent = connecting ? '◌ 连接中' : running ? (active.sending ? '● 发送中' : '● 监听中') : error ? '● 已停止' : '○ 监听';
+      const timedOut = idleStoppedItem === itemID;
+      button.textContent = connecting ? '◌ 连接中' : running ? (active.sending ? '● 发送中' : '● 监听中') : error ? '● 已停止' : timedOut ? '○ 超时停止' : '○ 监听';
       button.style.color = error ? '#bc3838' : running ? '#278243' : 'inherit';
       button.setAttribute('aria-pressed', String(running));
-      button.title = [error || (connecting ? '点击取消连接' : running ? '点击停止监听；已投递消息可能仍在处理中' : '点击开始监听'),
+      button.title = [error || (timedOut ? '无改动超时，点击重新开始监听' : connecting ? '点击取消连接' : running ? '点击停止监听；已投递消息可能仍在处理中' : '点击开始监听'),
         '点击旁边的箭头设置目标会话', running ? `目标：${active.threadId}` : ''].filter(Boolean).join('\n');
     }
   }
 
-  function stop() {
+  function stop(timedOutItem = null) {
     epoch++;
-    clearTimeout(timer); clearTimeout(heartbeat);
+    clearTimeout(timer); clearTimeout(heartbeat); clearTimeout(idleTimer);
     timer = null;
+    idleStoppedItem = timedOutItem;
     active = null; starting = null; rpc?.close(); rpc = null;
     render();
+  }
+  async function stopByUser() {
+    const current = active;
+    if (!current) { stop(); return; }
+    if (current.stopping) return;
+    const pending = ListenerCore.diff(current.inFlight || current.before, snapshot(current.itemID));
+    if (!pending.length) { stop(); return; }
+    current.stopping = true;
+    clearTimeout(timer); clearTimeout(heartbeat); clearTimeout(idleTimer); timer = null;
+    const prompt = Services.prompt;
+    const choice = prompt.confirmEx(Zotero.getMainWindow(), '停止监听', '还有未发送的改动。是否发送后停止？',
+      prompt.BUTTON_TITLE_IS_STRING * (prompt.BUTTON_POS_0 + prompt.BUTTON_POS_1),
+      '发送并停止', '直接停止', null, null, {});
+    if (choice === 0) {
+      if (current.delivery) { try { await current.delivery; } catch { return; } }
+      if (active !== current) return;
+      await flush();
+    }
+    if (active === current) stop();
+  }
+  function resetIdle() {
+    clearTimeout(idleTimer);
+    if (active && !active.stopping && idleMinutes() > 0) {
+      const current = active;
+      idleTimer = setTimeout(() => { if (active === current) stop(current.itemID); }, Math.round(idleMinutes() * 60000));
+    }
   }
   function fail(itemID, error) {
     stop(); errorItem = itemID; lastError = error.message || String(error); render();
@@ -148,6 +179,15 @@ var Listener = (() => {
     }
     save('sendDelay', String(seconds)); schedule(true);
   }
+  function configureIdle() {
+    const value = ask('无改动超时', '无批注或笔记改动多少分钟后停止（0 关闭，最长 1440）。超时不补发待发送改动。', String(idleMinutes()));
+    if (value === null) return;
+    const minutes = Number(value.trim());
+    if (!value.trim() || !validIdle(minutes)) {
+      Services.prompt.alert(Zotero.getMainWindow(), '无改动超时', '请输入 0–1440 之间的分钟数，0 表示关闭。'); return;
+    }
+    save('idleMinutes', String(minutes)); resetIdle();
+  }
   function menu(event, reader) {
     event.preventDefault(); event.stopPropagation();
     const anchor = event.currentTarget, doc = anchor.ownerDocument;
@@ -170,6 +210,7 @@ var Listener = (() => {
       ['设置目标会话…', () => configure(reader)],
       [`计时方式：${fixedInterval() ? '固定间隔' : '修改后等待'}`, () => { save('timing', fixedInterval() ? 'idle' : 'fixed'); schedule(true); }],
       ['发送间隔…', configureDelay],
+      ['无改动超时…', configureIdle],
       ['Node.js 路径…', () => { const value = ask('Node.js', '通常留空即可自动查找；也可填 node.exe 的完整路径', pref('node')); if (value !== null) { stop(); save('node', value.trim()); } }]
     ]) {
       const option = doc.createElement('button'); option.textContent = label;
@@ -191,8 +232,10 @@ var Listener = (() => {
     const button = doc.createElement('button'); button.className = 'toolbar-button codex-listener-button';
     button.style.cssText = 'width:auto;min-width:70px;padding:0 7px;font-size:12px;white-space:nowrap;';
     button.onclick = async () => {
-      if (active?.itemID === reader.itemID || starting?.itemID === reader.itemID) { stop(); return; }
-      try { await start(reader); } catch (error) { fail(reader.itemID, error); }
+      try {
+        if (active?.itemID === reader.itemID || starting?.itemID === reader.itemID) await stopByUser();
+        else await start(reader);
+      } catch (error) { fail(reader.itemID, error); }
     };
     const arrow = doc.createElement('button'); arrow.className = 'toolbar-button codex-listener-settings';
     arrow.textContent = '▾'; arrow.title = '监听设置';
@@ -226,14 +269,14 @@ var Listener = (() => {
     } catch (error) { if (generation === epoch) fail(reader.itemID, error); return; }
     if (generation !== epoch) { connection.close(); return; }
     starting = null; active = {
-      itemID: reader.itemID, threadId: targets()[key(attachment)], before, sending: false,
+      itemID: reader.itemID, threadId: targets()[key(attachment)], before, observed: before, sending: false,
       paper: { title: paper.getField('title'), libraryID: paper.libraryID, itemKey: paper.key, attachmentKey: attachment.key }
     };
-    render(); schedule(); pulse(generation);
+    render(); schedule(); pulse(generation); resetIdle();
   }
   function schedule(reset = false) {
     if (reset) { clearTimeout(timer); timer = null; }
-    if (!active || timer != null) return;
+    if (!active || active.stopping || timer != null) return;
     timer = setTimeout(() => {
       timer = null;
       if (fixedInterval()) schedule();
@@ -248,10 +291,13 @@ var Listener = (() => {
       if (!changes.length) return;
       current.sending = true; render();
       const text = ListenerCore.prompt(current.paper, changes);
-      await connection.call({ action: 'send', threadId: current.threadId, prompt: text });
+      current.inFlight = after;
+      current.delivery = connection.call({ action: 'send', threadId: current.threadId, prompt: text });
+      await current.delivery;
       if (active !== current) return;
       current.before = after; current.sending = false; render(); schedule();
     } catch (error) { if (active === current) fail(current.itemID, error); }
+    finally { current.inFlight = null; current.delivery = null; }
   }
   async function pulse(generation) {
     heartbeat = setTimeout(async () => {
@@ -279,7 +325,13 @@ var Listener = (() => {
     Zotero.Reader.registerEventListener('renderToolbar', toolbar, ID);
     observer = Zotero.Notifier.registerObserver({ notify(event, type) {
       if (type === 'tab') { setTimeout(checkReader, 0); return; }
-      if (active && ['add', 'modify', 'delete', 'trash'].includes(event)) schedule(!fixedInterval());
+      if (active && !active.stopping && ['add', 'modify', 'delete', 'trash'].includes(event)) {
+        try {
+          const after = snapshot(active.itemID);
+          if (!ListenerCore.diff(active.observed, after).length) return;
+          active.observed = after; resetIdle(); schedule(!fixedInterval());
+        } catch (error) { fail(active.itemID, error); }
+      }
     } }, ['item', 'tab'], 'codex-listener');
     attachExisting();
   }
