@@ -2,8 +2,13 @@
 import { readdir, readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(await readFile(path.join(root, 'addon/manifest.json'), 'utf8'));
+const app = manifest.applications?.zotero;
+for (const field of ['id', 'update_url', 'strict_min_version', 'strict_max_version']) {
+  if (!app?.[field]) throw new Error(`Missing applications.zotero.${field}`);
+}
 function crc32(data) {
   let crc = 0xffffffff;
   for (const byte of data) { crc ^= byte; for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); }
@@ -32,5 +37,14 @@ const directory = Buffer.concat(central), end = Buffer.alloc(22);
 end.writeUInt32LE(0x06054b50); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16);
 await mkdir(path.join(root, 'dist'), { recursive: true });
 const output = path.join(root, `dist/zotero-codex-listener-${manifest.version}.xpi`);
-await writeFile(output, Buffer.concat([...local, directory, end]));
+const archive = Buffer.concat([...local, directory, end]);
+await writeFile(output, archive);
+await writeFile(path.join(root, 'updates.json'), JSON.stringify({ addons: {
+  [app.id]: { updates: [{
+    version: manifest.version,
+    update_link: `${manifest.homepage_url}/releases/download/v${manifest.version}/${path.basename(output)}`,
+    update_hash: `sha256:${createHash('sha256').update(archive).digest('hex')}`,
+    applications: { zotero: { strict_min_version: app.strict_min_version, strict_max_version: app.strict_max_version } }
+  }] }
+} }, null, 2) + '\n');
 console.log(output);

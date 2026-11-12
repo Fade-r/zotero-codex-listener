@@ -1,0 +1,19 @@
+{
+  "addons": {
+    "zotero-codex-listener@fade-r.github.io": {
+      "updates": [
+        {
+          "version": "0.1.1",
+          "update_link": "https://github.com/Fade-r/zotero-codex-listener/releases/download/v0.1.1/zotero-codex-listener-0.1.1.xpi",
+          "update_hash": "sha256:91043fb9559de6930c4b61885eeb923ea1c35dbc9741d03ca42c154a343c1a95",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "7.0",
+              "strict_max_version": "10.*"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
