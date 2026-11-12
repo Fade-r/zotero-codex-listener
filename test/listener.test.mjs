@@ -49,10 +49,15 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
       Items: { get: () => attachment }, Libraries: { get: () => group ? { libraryType: 'group', groupID: 42 } : { libraryType: 'user' } },
       Reader: { _readers: readers, registerEventListener: (_, fn) => { handler = fn; }, unregisterEventListener() {} },
       Notifier: { registerObserver: obj => { observer = obj; return 1; }, unregisterObserver() {} },
-      getTempDirectory: file, File: { putContentsAsync: async () => {}, getContentsAsync: async () => '' }, logError() {}
+      getTempDirectory: file, File: { putContentsAsync: async () => {}, getContentsAsync: async channel => {
+        assert.equal(typeof channel, 'object', 'XPI resources must use a channel, not HTTP URL parsing');
+        assert.equal(channel.loadUsingSystemPrincipal, true);
+        assert.equal(channel.uri, 'jar:file:///plugin.xpi!/content/bridge.mjs');
+        return '';
+      } }, logError() {}
     },
-    Services: {}, Components: { interfaces: { nsIFile: { DIRECTORY_TYPE: 1 } } }, rootURI: '',
-    ChromeUtils: { importESModule: name => name.includes('Subprocess') ? { Subprocess } : {
+    Services: {}, Components: { interfaces: { nsIFile: { DIRECTORY_TYPE: 1 } } }, rootURI: 'jar:file:///plugin.xpi!/',
+    ChromeUtils: { importESModule: name => name.includes('NetUtil') ? { NetUtil: { newChannel: options => options } } : name.includes('Subprocess') ? { Subprocess } : {
       setTimeout: (fn, ms) => { timers.set(++timerID, { fn, ms }); return timerID; }, clearTimeout: id => timers.delete(id)
     } }
   });

@@ -221,10 +221,13 @@ var Listener = (() => {
     if (current && !Zotero.Reader._readers.some(reader => reader.itemID === current.itemID)) stop();
   }
   async function startup() {
+    const { NetUtil } = ChromeUtils.importESModule('resource://gre/modules/NetUtil.sys.mjs');
+    const channel = NetUtil.newChannel({ uri: rootURI + 'content/bridge.mjs', loadUsingSystemPrincipal: true });
+    const source = await Zotero.File.getContentsAsync(channel, 'UTF-8');
     const directory = Zotero.getTempDirectory(); directory.append('zotero-codex-listener');
     directory.createUnique(Components.interfaces.nsIFile.DIRECTORY_TYPE, 0o700);
     bridgeFile = directory.clone(); bridgeFile.append('bridge.mjs');
-    await Zotero.File.putContentsAsync(bridgeFile.path, await Zotero.File.getContentsAsync(rootURI + 'content/bridge.mjs'));
+    await Zotero.File.putContentsAsync(bridgeFile.path, source);
     Zotero.Reader.registerEventListener('renderToolbar', toolbar, ID);
     observer = Zotero.Notifier.registerObserver({ notify(event, type) {
       if (type === 'tab') { setTimeout(checkReader, 0); return; }
