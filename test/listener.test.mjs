@@ -171,9 +171,44 @@ const click = target => ({ currentTarget: target, target, preventDefault() {}, s
 function setDelay(f, value) {
   f.promptValue = value;
   f.arrow.onclick(click(f.arrow));
-  const option = f.doc.querySelector('.codex-listener-menu').children.find(e => e.textContent === '发送延迟…');
+  const option = f.doc.querySelector('.codex-listener-menu').children.find(e => e.textContent === '发送间隔…');
   option.onclick(click(option));
 }
+function toggleTiming(f) {
+  f.arrow.onclick(click(f.arrow));
+  const option = f.doc.querySelector('.codex-listener-menu').children.find(e => e.textContent.startsWith('计时方式：'));
+  option.onclick(click(option));
+}
+const pendingSendTimer = (f, ms) => [...f.timers].find(([, timer]) => timer.ms === ms)?.[0];
+test('fixed intervals keep ticking without edits and edits do not reset the timer', async t => {
+  const f = await fixture(t); setDelay(f, '3'); toggleTiming(f);
+  assert.equal(f.saved.get('extensions.zotero-codex-listener.timing'), 'fixed');
+  await f.button.onclick();
+  await f.run(3000); await f.run(3000); assert.equal(f.sends().length, 0);
+  const timer = pendingSendTimer(f, 3000);
+  f.annotations = [annotation('first')]; f.event();
+  f.annotations = [annotation('second')]; f.event();
+  assert.equal(pendingSendTimer(f, 3000), timer);
+  await f.run(3000); assert.equal(f.sends().length, 1);
+  assert.equal(payload(f.sends()[0]).changes[0].after.comment, 'second');
+  await f.run(3000); assert.equal(f.sends().length, 1);
+  await f.button.onclick(); assert.equal(pendingSendTimer(f, 3000), undefined);
+  await f.button.onclick(); assert.ok(pendingSendTimer(f, 3000));
+  toggleTiming(f);
+  const before = pendingSendTimer(f, 3000); f.event();
+  assert.notEqual(pendingSendTimer(f, 3000), before);
+});
+test('fixed intervals retain edits during delivery without overlapping sends or shifting the timer', async t => {
+  const f = await fixture(t, { delayedSend: true }); setDelay(f, '3'); toggleTiming(f);
+  await f.button.onclick(); f.annotations = [annotation('first')]; f.event(); await f.run(3000);
+  f.annotations = [annotation('second')]; f.event(); await f.run(3000);
+  assert.equal(f.sends().length, 1);
+  const timer = pendingSendTimer(f, 3000);
+  f.processes[0].reply(f.sends()[0]); await tick();
+  assert.equal(pendingSendTimer(f, 3000), timer);
+  await f.run(3000); assert.equal(f.sends().length, 2);
+  assert.equal(payload(f.sends()[1]).changes[0].after.comment, 'second');
+});
 test('changing delay preserves pending edits and resets the debounce timer', async t => {
   const f = await fixture(t); await f.button.onclick();
   f.annotations = [annotation('first')]; f.event();
@@ -207,7 +242,7 @@ test('settings arrow opens a menu and saves the target without starting the list
   const menu = f.doc.querySelector('.codex-listener-menu');
   assert.ok(menu); assert.equal(f.arrow.getAttribute('aria-expanded'), 'true');
   assert.equal(menu.style.left, '600px'); assert.equal(menu.style.top, '44px');
-  assert.deepEqual(menu.children.map(e => e.textContent), ['设置目标会话…', '发送延迟…', 'Node.js 路径…']);
+  assert.deepEqual(menu.children.map(e => e.textContent), ['设置目标会话…', '计时方式：修改后等待', '发送间隔…', 'Node.js 路径…']);
   f.promptValue = 'codex://threads/87654321-1234-1234-1234-123456789abc';
   menu.children[0].onclick(click(menu.children[0]));
   assert.equal(f.arrow.getAttribute('aria-expanded'), 'false');

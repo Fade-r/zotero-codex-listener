@@ -14,6 +14,7 @@ var Listener = (() => {
   const targets = () => { try { return JSON.parse(pref('targets') || '{}'); } catch { return {}; } };
   const validDelay = seconds => Number.isFinite(seconds) && seconds >= 0.1 && seconds <= 3600;
   const sendDelay = () => { const seconds = Number(pref('sendDelay')); return validDelay(seconds) ? seconds : 1.5; };
+  const fixedInterval = () => pref('timing') === 'fixed';
 
   async function nodeCommand() {
     if (pref('node')) return pref('node');
@@ -115,6 +116,7 @@ var Listener = (() => {
   function stop() {
     epoch++;
     clearTimeout(timer); clearTimeout(heartbeat);
+    timer = null;
     active = null; starting = null; rpc?.close(); rpc = null;
     render();
   }
@@ -137,14 +139,14 @@ var Listener = (() => {
     errorItem = null; lastError = ''; render(); return true;
   }
   function configureDelay() {
-    const value = ask('发送延迟', '停止修改后等待多少秒再发送（0.1–3600，默认 1.5）', String(sendDelay()));
+    const value = ask('发送间隔', '等待或间隔秒数（0.1–3600，默认 1.5）', String(sendDelay()));
     if (value === null) return;
     const seconds = Number(value.trim());
     if (!validDelay(seconds)) {
-      Services.prompt.alert(Zotero.getMainWindow(), '发送延迟', '请输入 0.1–3600 之间的秒数。');
+      Services.prompt.alert(Zotero.getMainWindow(), '发送间隔', '请输入 0.1–3600 之间的秒数。');
       return;
     }
-    save('sendDelay', String(seconds)); schedule();
+    save('sendDelay', String(seconds)); schedule(true);
   }
   function menu(event, reader) {
     event.preventDefault(); event.stopPropagation();
@@ -166,7 +168,8 @@ var Listener = (() => {
     popup.style.top = `${rect.bottom + 4}px`;
     for (const [label, action] of [
       ['设置目标会话…', () => configure(reader)],
-      ['发送延迟…', configureDelay],
+      [`计时方式：${fixedInterval() ? '固定间隔' : '修改后等待'}`, () => { save('timing', fixedInterval() ? 'idle' : 'fixed'); schedule(true); }],
+      ['发送间隔…', configureDelay],
       ['Node.js 路径…', () => { const value = ask('Node.js', '通常留空即可自动查找；也可填 node.exe 的完整路径', pref('node')); if (value !== null) { stop(); save('node', value.trim()); } }]
     ]) {
       const option = doc.createElement('button'); option.textContent = label;
@@ -228,9 +231,14 @@ var Listener = (() => {
     };
     render(); schedule(); pulse(generation);
   }
-  function schedule() {
-    clearTimeout(timer);
-    if (active) timer = setTimeout(() => void flush(), Math.round(sendDelay() * 1000));
+  function schedule(reset = false) {
+    if (reset) { clearTimeout(timer); timer = null; }
+    if (!active || timer != null) return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (fixedInterval()) schedule();
+      void flush();
+    }, Math.round(sendDelay() * 1000));
   }
   async function flush() {
     const current = active, connection = rpc;
@@ -271,7 +279,7 @@ var Listener = (() => {
     Zotero.Reader.registerEventListener('renderToolbar', toolbar, ID);
     observer = Zotero.Notifier.registerObserver({ notify(event, type) {
       if (type === 'tab') { setTimeout(checkReader, 0); return; }
-      if (active && ['add', 'modify', 'delete', 'trash'].includes(event)) schedule();
+      if (active && ['add', 'modify', 'delete', 'trash'].includes(event)) schedule(!fixedInterval());
     } }, ['item', 'tab'], 'codex-listener');
     attachExisting();
   }
