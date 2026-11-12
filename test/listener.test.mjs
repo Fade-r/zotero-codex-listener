@@ -9,11 +9,12 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
 // Exercise the actual listener with Zotero events, a delayed subprocess and a fake clock.
-async function fixture(t, { delayedStart = false, delayedSend = false, group = false } = {}) {
+async function fixture(t, { delayedStart = false, delayedSend = false, group = false, environment = { Path: 'D:\\Apps\\nodejs' }, nodeMissing = false } = {}) {
   const timers = new Map(), requests = [], processes = [], elements = [];
   let timerID = 0, observer, handler, annotations = [], failSend = false;
   const launch = deferred();
   const events = new Map(), saved = new Map();
+  const alerts = [], searches = [], commands = [];
   let promptValue = null;
   const file = () => ({ path: 'test-temp/bridge.mjs', append() {}, createUnique() {}, clone: file, exists: () => false });
   const doc = {
@@ -39,8 +40,14 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
   const attachment = { key: 'PDF', libraryID: 1, parentItem: paper, getAnnotations: () => annotations };
   const reader = { itemID: 1 }, readers = [reader];
   const Subprocess = {
-    pathSearch: async () => 'node',
-    async call() {
+    getEnvironment: () => environment,
+    pathSearch: async (name, env) => {
+      searches.push({ name, environment: env });
+      if (nodeMissing || !env.PATH) throw new Error('Executable not found: ' + name);
+      return env.PATH + '\\' + name;
+    },
+    async call(options) {
+      commands.push(options.command);
       if (delayedStart) await launch.promise;
       let read;
       const process = {
@@ -71,7 +78,7 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
         return '';
       } }, logError() {}
     },
-    Services: { prompt: { prompt(_win, _title, _message, input) { if (promptValue === null) return false; input.value = promptValue; return true; } } },
+    Services: { prompt: { alert(_win, title, message) { alerts.push({ title, message }); }, prompt(_win, _title, _message, input) { if (promptValue === null) return false; input.value = promptValue; return true; } } },
     Components: { interfaces: { nsIFile: { DIRECTORY_TYPE: 1 } } }, rootURI: 'jar:file:///plugin.xpi!/',
     ChromeUtils: { importESModule: name => name.includes('NetUtil') ? { NetUtil: { newChannel: options => options } } : name.includes('Subprocess') ? { Subprocess } : {
       setTimeout: (fn, ms) => { timers.set(++timerID, { fn, ms }); return timerID; }, clearTimeout: id => timers.delete(id)
@@ -82,7 +89,7 @@ async function fixture(t, { delayedStart = false, delayedSend = false, group = f
   t.after(() => context.Listener.shutdown());
   return {
     button: doc.querySelector('.codex-listener-button'), arrow: doc.querySelector('.codex-listener-settings'), doc, events, saved,
-    shutdown: () => context.Listener.shutdown(), requests, processes, launch, readers,
+    shutdown: () => context.Listener.shutdown(), requests, processes, launch, readers, alerts, searches, commands,
     set promptValue(value) { promptValue = value; },
     set annotations(value) { annotations = value; }, set failSend(value) { failSend = value; },
     event: () => observer.notify('modify', 'item'), close: () => { readers.length = 0; observer.notify('close', 'tab'); },
@@ -117,12 +124,38 @@ test('stopping during subprocess startup kills the late process', async t => {
   await tick(); await f.button.onclick(); f.launch.resolve(); await starting;
   assert.equal(f.processes[0].killed, true); assert.equal(f.requests.length, 0);
   assert.equal(f.button.textContent, '○ 监听');
+  assert.equal(f.alerts.length, 0);
 });
 test('delivery failure stops listening without retrying', async t => {
   const f = await fixture(t); await f.button.onclick(); f.failSend = true;
   f.annotations = [annotation('new')]; f.event(); await f.run(1500); await f.run(1500);
   assert.equal(f.sends().length, 1); assert.equal(f.processes[0].killed, true);
   assert.equal(f.button.textContent, '● 已停止');
+  assert.equal(f.alerts.length, 1); assert.equal(f.alerts[0].message, 'synthetic failure');
+});
+test('Windows Path casing resolves node.exe without modifying the process environment', async t => {
+  for (const name of ['Path', 'PATH', 'path']) {
+    const environment = { [name]: 'D:\\Apps\\nodejs' };
+    const f = await fixture(t, { environment });
+    await f.button.onclick();
+    assert.equal(f.commands[0], 'D:\\Apps\\nodejs\\node.exe');
+    assert.deepEqual(Object.keys(environment), [name]);
+    assert.equal(f.alerts.length, 0);
+  }
+});
+test('missing Node shows one actionable alert and stays stopped without retrying', async t => {
+  const f = await fixture(t, { nodeMissing: true });
+  await f.button.onclick(); await f.run(10000); await f.run(1500);
+  assert.equal(f.processes.length, 0); assert.equal(f.searches.length, 1);
+  assert.equal(f.button.textContent, '● 已停止');
+  assert.equal(f.alerts.length, 1); assert.match(f.alerts[0].message, /Node.js 路径/);
+});
+test('an explicit Node path takes priority over automatic lookup', async t => {
+  const f = await fixture(t, { nodeMissing: true });
+  f.saved.set('extensions.zotero-codex-listener.node', 'E:\\Custom Node\\node.exe');
+  await f.button.onclick();
+  assert.equal(f.commands[0], 'E:\\Custom Node\\node.exe');
+  assert.equal(f.searches.length, 0); assert.equal(f.alerts.length, 0);
 });
 test('closing the reader stops the helper', async t => {
   const f = await fixture(t); await f.button.onclick(); f.close(); await f.run(0);

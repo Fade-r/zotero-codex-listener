@@ -13,12 +13,21 @@ var Listener = (() => {
   const key = item => `${item.libraryID}/${item.key}`;
   const targets = () => { try { return JSON.parse(pref('targets') || '{}'); } catch { return {}; } };
 
+  async function nodeCommand() {
+    if (pref('node')) return pref('node');
+    const environment = Subprocess.getEnvironment();
+    // Windows exposes Path, while Subprocess.pathSearch reads PATH case-sensitively.
+    const path = Object.entries(environment).find(([name]) => name.toUpperCase() === 'PATH')?.[1] || '';
+    try { return await Subprocess.pathSearch('node.exe', { ...environment, PATH: path }); }
+    catch { throw new Error('找不到 Node.js。请安装 Node.js 22+，或在 ▾ → Node.js 路径中填写 node.exe 的完整路径。'); }
+  }
+
   class Bridge {
     pending = new Map();
     sequence = 0;
     closed = false;
     async start() {
-      const command = pref('node') || await Subprocess.pathSearch('node');
+      const command = await nodeCommand();
       this.process = await Subprocess.call({ command, arguments: [bridgeFile.path], stderr: 'pipe' });
       if (this.closed) { await this.process.kill(); throw new Error('监听已停止'); }
       this.read().catch(error => this.close(error));
@@ -110,6 +119,7 @@ var Listener = (() => {
   function fail(itemID, error) {
     stop(); errorItem = itemID; lastError = error.message || String(error); render();
     Zotero.logError(error);
+    Services.prompt.alert(Zotero.getMainWindow(), 'Codex 监听已停止', lastError);
   }
   function ask(title, message, value = '') {
     const input = { value };
